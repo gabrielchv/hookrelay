@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    name: typecheck + unit tests + build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build
+
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.9.8
+
+      - run: terraform fmt -check -recursive
+        working-directory: terraform
+
+      - run: terraform init -backend=false -input=false
+        working-directory: terraform
+
+      - run: terraform validate
+        working-directory: terraform
+
+  e2e:
+    name: end-to-end on Kafka and SQS
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.15.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Run the demo on the Kafka transport
+        run: |
+          docker compose down -v --remove-orphans || true
+          docker compose up -d --wait --wait-timeout 180
+          pnpm demo
+          docker compose down -v --remove-orphans || true
+
+      - name: Run the demo on the SQS transport
+        run: |
+          BROKER=sqs docker compose up -d --wait --wait-timeout 180
+          pnpm demo
+          docker compose down -v --remove-orphans || true
+
+      - name: Dump service logs on failure
+        if: failure()
+        run: docker compose logs --no-color || true

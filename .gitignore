@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+.env
+*.log
+.DS_Store
+.terraform/
+*.tfstate
+*.tfstate.*
+# The provider lock file IS committed on purpose: it pins provider versions.

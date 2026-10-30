@@ -1,0 +1,155 @@
+# Local, in-cluster run: same manifests as production, but backed by the free
+# moto AWS mock instead of a real account. This is what `k8s/` is validated
+# against — it proves the probe, scaling and security settings actually admit
+# the container, which static linting cannot.
+#
+#   k3d cluster create hookrelay --wait
+#   k3d image import hookrelay:local redis:7-alpine motoserver/moto:latest -c hookrelay
+#   kubectl apply -f k8s/local/00-prereqs.yaml
+#   kubectl apply -f k8s/
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hookrelay
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: hookrelay-config
+  namespace: hookrelay
+data:
+  NODE_ENV: production
+  LOG_LEVEL: info
+  BROKER: sqs
+  REDIS_URL: redis://redis:6379
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://moto:5000
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  ENDPOINTS_TABLE: hookrelay_endpoints
+  DELIVERIES_TABLE: hookrelay_deliveries
+  MAX_ATTEMPTS: "3"
+  BASE_BACKOFF_MS: "200"
+  MAX_BACKOFF_MS: "2000"
+  RATE_LIMIT_PER_SEC: "50"
+  SCHEDULER_INTERVAL_MS: "100"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hookrelay-secrets
+  namespace: hookrelay
+type: Opaque
+stringData:
+  SQS_QUEUE_URL: "http://moto:5000/123456789012/hookrelay-deliveries"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: moto
+  namespace: hookrelay
+  labels:
+    app.kubernetes.io/name: hookrelay
+    app.kubernetes.io/component: moto
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hookrelay
+      app.kubernetes.io/component: moto
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hookrelay
+        app.kubernetes.io/component: moto
+    spec:
+      containers:
+        - name: moto
+          image: motoserver/moto:latest
+          ports:
+            - name: http
+              containerPort: 5000
+          readinessProbe:
+            httpGet:
+              path: /moto-api/
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 384Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: moto
+  namespace: hookrelay
+spec:
+  selector:
+    app.kubernetes.io/name: hookrelay
+    app.kubernetes.io/component: moto
+  ports:
+    - port: 5000
+      targetPort: http
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hookrelay-sink
+  namespace: hookrelay
+spec:
+  selector:
+    app.kubernetes.io/name: hookrelay
+    app.kubernetes.io/component: sink
+  ports:
+    - port: 3100
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hookrelay-sink
+  namespace: hookrelay
+  labels:
+    app.kubernetes.io/name: hookrelay
+    app.kubernetes.io/component: sink
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: hookrelay
+      app.kubernetes.io/component: sink
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: hookrelay
+        app.kubernetes.io/component: sink
+    spec:
+      containers:
+        - name: sink
+          image: hookrelay:local
+          command: ["node", "dist/services/sink.js"]
+          ports:
+            - name: http
+              containerPort: 3100
+          env:
+            - name: SINK_PORT
+              value: "3100"
+            - name: FAIL_FIRST
+              value: "2"
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 3
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

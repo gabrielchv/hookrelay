@@ -1,0 +1,142 @@
+name: hookrelay
+
+# Everything here runs offline and free. Moto stands in for AWS (SQS +
+# DynamoDB), so the SQS path is exercised for real without credentials or spend.
+# Set BROKER=sqs to run the worker on SQS instead of Kafka:
+#   BROKER=sqs docker compose up -d worker
+
+x-app-build: &app-build
+  build:
+    context: .
+    target: tools
+  image: hookrelay:tools
+
+x-app-env: &app-env
+  NODE_ENV: production
+  LOG_LEVEL: info
+  BROKER: ${BROKER:-kafka}
+  REDIS_URL: redis://redis:6379
+  KAFKA_BROKERS: kafka:9092
+  KAFKA_TOPIC: hookrelay.deliveries
+  KAFKA_GROUP_ID: hookrelay-workers
+  KAFKA_PARTITIONS: "3"
+  SQS_QUEUE_URL: http://moto:5000/123456789012/hookrelay-deliveries
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://moto:5000
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  MAX_ATTEMPTS: "3"
+  BASE_BACKOFF_MS: "200"
+  MAX_BACKOFF_MS: "2000"
+  RATE_LIMIT_PER_SEC: "50"
+  SCHEDULER_INTERVAL_MS: "100"
+
+services:
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  kafka:
+    image: apache/kafka:4.4.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "false"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1",
+        ]
+      interval: 5s
+      timeout: 10s
+      retries: 30
+      start_period: 20s
+
+  # Free, credential-free AWS API mock (SQS + DynamoDB).
+  moto:
+    image: motoserver/moto:latest
+    environment:
+      MOTO_PORT: "5000"
+    ports:
+      - "4566:5000"
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python3 -c \"import urllib.request;urllib.request.urlopen('http://localhost:5000/moto-api/',timeout=2)\" || exit 1",
+        ]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  provision:
+    <<: *app-build
+    command: ["pnpm", "provision"]
+    environment: *app-env
+    depends_on:
+      moto:
+        condition: service_healthy
+
+  sink:
+    <<: *app-build
+    command: ["pnpm", "dev:sink"]
+    environment:
+      SINK_PORT: "3100"
+      FAIL_FIRST: "2"
+    ports:
+      - "3110:3100"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3100/healthz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  api:
+    <<: *app-build
+    command: ["pnpm", "dev:api"]
+    environment: *app-env
+    ports:
+      - "3010:3000"
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/healthz >/dev/null || exit 1"]
+      interval: 3s
+      timeout: 3s
+      retries: 40
+
+  worker:
+    <<: *app-build
+    command: ["pnpm", "dev:worker"]
+    environment: *app-env
+    depends_on:
+      redis:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+      provision:
+        condition: service_completed_successfully
+      api:
+        condition: service_started
