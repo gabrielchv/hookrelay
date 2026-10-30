@@ -67,6 +67,14 @@ spec:
       containers:
         - name: moto
           image: motoserver/moto:latest
+          # Kubernetes injects MOTO_PORT=tcp://<cluster-ip>:5000 for the Service
+          # named `moto`, and moto parses MOTO_PORT as an int at startup. Setting
+          # it explicitly here wins over the injected value and keeps moto bound
+          # to the expected port. Found by actually running the manifest, not by
+          # linting it.
+          env:
+            - name: MOTO_PORT
+              value: "5000"
           ports:
             - name: http
               containerPort: 5000

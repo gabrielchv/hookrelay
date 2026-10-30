@@ -68,6 +68,31 @@ The sink service is configured with `FAIL_FIRST=2`, so success on attempt 3 is
 only reachable through the retry path. The second endpoint always returns 500
 and must reach `dead`.
 
+## Running on Kubernetes (locally, free)
+
+The manifests in `k8s/` are the real ones — same probes, HPAs, PDBs and security
+contexts you would deploy. They are backed by the same Moto mock instead of a
+real AWS account.
+
+```bash
+k3d cluster create hookrelay --wait
+k3d image import hookrelay:local -c hookrelay     # build it first, see Dockerfile
+kubectl apply -f k8s/00-namespace.yaml -f k8s/local/00-prereqs.yaml \
+              -f k8s/05-redis.yaml -f k8s/10-api.yaml -f k8s/20-worker.yaml
+
+# provision SQS + DynamoDB inside the cluster's moto, then exercise it
+kubectl port-forward -n hookrelay svc/moto 5000:5000 &
+AWS_ENDPOINT_URL=http://localhost:5000 AWS_REGION=us-east-1 \
+  AWS_ACCESS_KEY_ID=test AWS_SECRET_ACCESS_KEY=test pnpm provision
+
+kubectl port-forward -n hookrelay svc/hookrelay-api 3010:80 &
+kubectl port-forward -n hookrelay svc/hookrelay-sink 3110:3100 &
+ENDPOINT_BASE=http://hookrelay-sink:3100 pnpm demo
+```
+
+`k3d image import` cannot load multi-arch images into containerd, so `redis` and
+`moto` are pulled by the cluster from the registry rather than imported.
+
 ## API
 
 | Method | Path | Purpose |
@@ -169,19 +194,30 @@ What I ran, and what it showed:
   returned the same `eventId`.
 - `terraform init -backend=false && terraform validate` — valid. `plan`/`apply`
   were **not** run: that needs a real AWS account and would cost money.
-- `kubectl apply --dry-run=server` against a real k3d API server — all manifests
-  accepted (schema + admission). A full in-cluster rollout was **not** verified:
-  see Known issues.
+- **Kubernetes: deployed and exercised in a real cluster** (k3d, k8s v1.30.4).
+  All 7 pods reached `Running` with **0 restarts**; the API ran with 2 replicas
+  and the worker with 2, and the full demo passed in-cluster on the SQS broker
+  (delivered after retries, `dead` at `maxAttempts`, signatures verified,
+  idempotent replay). The sink observed exactly 6 requests for 2 deliveries —
+  no duplicates, which is the Redis delivery lease holding across pods. Both
+  HPAs report live CPU metrics (`1%/70%`, `7%/80%`), so autoscaling is wired
+  correctly; it was not driven to scale under sustained load.
 
 ## Known issues / honest gaps
 
-- **Kubernetes manifests are validated but not run in-cluster.** The API server
-  accepted them, but this machine's root filesystem is at 100% capacity, so the
-  k3d node taints itself `disk-pressure:NoSchedule` and nothing schedules.
-  Unverified as a result: probe behaviour under real load, HPA scaling.
-- **`plan`/`apply` for Terraform is untested** for the same reason as above —
-  no AWS account exercised. IAM policies are written least-privilege but not
-  proven against real API calls.
+- **`plan`/`apply` for Terraform is untested** — no AWS account exercised. IAM
+  policies are written least-privilege but not proven against real API calls.
+- **HPA behaviour under sustained load is untested.** Both autoscalers read live
+  metrics and are wired correctly, but nothing was pushed hard enough to trigger
+  a scale-out, so the scaling curve is unproven.
+- **`k3d image import` cannot load multi-arch images** (`redis`, `moto`) into
+  containerd — it fails with a content-digest error. The cluster pulls them from
+  the registry instead. Not a defect in these manifests, but it will bite anyone
+  following the local k3d recipe with a restricted registry.
+- **A `Service` named after a tool can break its env config.** The `moto`
+  Service injects `MOTO_PORT=tcp://…` into its own pods, and moto parses that as
+  an int. Fixed by setting `MOTO_PORT` explicitly on the container; worth
+  remembering before naming any Service after a config prefix.
 - **kafkajs 2.2.4 emits `TimeoutNegativeWarning` on startup.** Traced to
   `RequestQueue.scheduleCheckPendingRequests` in kafkajs itself — an upstream
   bug where the computed delay goes negative. Harmless (Node clamps to 1 ms),
