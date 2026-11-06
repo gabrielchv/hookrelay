@@ -28,7 +28,7 @@ interface Harness {
 
 function harness(
   results: Array<{ ok: boolean; statusCode: number | null; error: string | null; durationMs: number }>,
-  options: { limiter?: 'allow' | 'deny'; endpoint?: Endpoint } = {},
+  options: { limiter?: 'allow' | 'deny'; endpoint?: Endpoint; timeoutMs?: number } = {},
 ): Harness {
   const deliveries = new MemoryDeliveryRepo();
   const endpoints = new MemoryEndpointRepo();
@@ -48,6 +48,7 @@ function harness(
     client,
     policy,
     rateLimitPerSec: 20,
+    deliveryTimeoutMs: options.timeoutMs ?? 5000,
     random: () => 0,
   });
 
@@ -169,6 +170,17 @@ describe('Dispatcher', () => {
   it('skips unknown deliveries instead of throwing', async () => {
     const h = harness([], {});
     await expect(h.dispatcher.process(makeJob({ deliveryId: 'nope' }))).resolves.toBe('skipped');
+  });
+
+  it('passes the configured delivery timeout to the client', async () => {
+    const h = harness([{ ok: true, statusCode: 200, error: null, durationMs: 1 }], {
+      timeoutMs: 1234,
+    });
+    await h.deliveries.create(delivery);
+
+    await h.dispatcher.process(makeJob());
+
+    expect(h.client.requests[0]?.timeoutMs).toBe(1234);
   });
 });
 

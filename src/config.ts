@@ -7,6 +7,16 @@ const schema = z.object({
   PORT: z.coerce.number().int().positive().default(3000),
   HOST: z.string().default('0.0.0.0'),
 
+  /**
+   * When set, every `/v1` route requires this key (`Authorization: Bearer` or
+   * `X-Api-Key`). Unset means an open API, which is the local/demo default.
+   * An empty value counts as unset so `API_KEY=` in a compose env file is safe.
+   */
+  API_KEY: z.preprocess(
+    (value) => (value === '' ? undefined : value),
+    z.string().min(16, 'API_KEY must be at least 16 characters').optional(),
+  ),
+
   /** Which transport the worker consumes and the API publishes to. */
   BROKER: z.enum(['kafka', 'sqs']).default('kafka'),
 

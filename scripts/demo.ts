@@ -13,6 +13,8 @@
 import { verifySignature, SIGNATURE_HEADER } from '../src/core/signature.js';
 
 const API = process.env.API_URL ?? 'http://localhost:3010';
+/** Set when the stack runs with API_KEY, so the demo can authenticate. */
+const API_KEY = process.env.API_KEY;
 /** Host-visible address, used only to read back what the sink recorded. */
 const SINK = process.env.SINK_URL ?? 'http://localhost:3110';
 /**
@@ -55,7 +57,11 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API}${path}`, {
     ...init,
-    headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      'content-type': 'application/json',
+      ...(API_KEY ? { authorization: `Bearer ${API_KEY}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
   const text = await response.text();
   if (!response.ok) {

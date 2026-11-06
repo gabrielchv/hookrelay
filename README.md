@@ -104,6 +104,23 @@ ENDPOINT_BASE=http://hookrelay-sink:3100 pnpm demo
 | `POST` | `/v1/deliveries/:id/replay` | Re-queue a non-delivered delivery. |
 | `GET` | `/healthz` | Liveness/readiness, including Redis. |
 
+`/healthz` is always open. Every `/v1` route is open by default and requires a
+credential as soon as `API_KEY` is set:
+
+```bash
+API_KEY=... docker compose up -d --wait
+
+curl -sX POST localhost:3010/v1/endpoints \
+  -H "authorization: Bearer $API_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"url":"https://example.com/hook","eventTypes":["order.created"]}'
+```
+
+Both `Authorization: Bearer <key>` and `X-Api-Key: <key>` are accepted; the
+comparison is constant-time and hashed, so it leaks neither the key's contents
+nor its length. The key is a single shared secret — there is no per-caller
+identity or rotation yet.
+
 ```bash
 # register
 curl -sX POST localhost:3010/v1/endpoints \
@@ -155,8 +172,10 @@ misconfiguration fails fast instead of surfacing as a confusing runtime error.
 | `KAFKA_BROKERS` / `KAFKA_TOPIC` | `localhost:9092` / `hookrelay.deliveries` | |
 | `SQS_QUEUE_URL` | — | required when `BROKER=sqs` |
 | `AWS_ENDPOINT_URL` | — | `http://moto:5000` locally; unset for real AWS |
+| `API_KEY` | — | when set, `/v1` requires it (16+ chars); unset = open API |
 | `MAX_ATTEMPTS` | `5` | |
 | `BASE_BACKOFF_MS` / `MAX_BACKOFF_MS` | `250` / `30000` | |
+| `DELIVERY_TIMEOUT_MS` | `5000` | per delivery attempt |
 | `RATE_LIMIT_PER_SEC` | `20` | per endpoint |
 
 ## Layout
@@ -169,7 +188,7 @@ src/
   broker/      Kafka + SQS adapters
   api/         Fastify routes
   worker/      broker consumer + retry scheduler
-tests/         36 unit tests, all against in-memory fakes
+tests/         49 unit tests, all against in-memory fakes
 scripts/       demo (e2e) and provisioning
 terraform/     real-AWS SQS + DynamoDB + least-privilege IAM
 k8s/           Deployments, HPAs, PDBs, probes, security contexts
@@ -184,14 +203,19 @@ tested in milliseconds without a single container.
 What I ran, and what it showed:
 
 - `pnpm typecheck` — clean.
-- `pnpm test` — **36/36 passing**. Covers backoff bounds, signature
+- `pnpm test` — **49/49 passing**. Covers backoff bounds, signature
   verification (tampering, wrong secret, replay, rotation), dispatcher state
   transitions, lease behaviour, rate-limit not consuming attempts, API fan-out,
-  idempotent replay, and secret redaction.
-- `pnpm demo` against docker compose — **passes on both Kafka and SQS**.
+  idempotent replay, secret redaction, API-key auth (bearer, header, wrong key,
+  open `/healthz`), and the configured delivery timeout reaching the client.
+- `pnpm demo` against docker compose with `API_KEY` set — **passes on both
+  Kafka and SQS**.
   Delivered after retries, reached `dead` at `maxAttempts`, every received
   request's signature verified against the endpoint secret, idempotent replay
   returned the same `eventId`.
+- API-key auth exercised against the live stack: `/v1` returns `401` with no
+  credential or a wrong one, `201`/`404` with a correct `Authorization: Bearer`
+  or `X-Api-Key`, and `/healthz` stays `200` throughout.
 - `terraform init -backend=false && terraform validate` — valid. `plan`/`apply`
   were **not** run: that needs a real AWS account and would cost money.
 - **Kubernetes: deployed and exercised in a real cluster** (k3d, k8s v1.30.4).
@@ -224,9 +248,10 @@ What I ran, and what it showed:
   and not from this codebase, but noisy.
 - **Fan-out scans every endpoint.** Fine for tens, wrong for thousands; the fix
   is a GSI, tracked in [docs/architecture.md](docs/architecture.md).
-- **No auth on the API itself.** Any caller who can reach `/v1/endpoints` can
-  register one. This is a local/demo service; putting it behind an API key is
-  the first thing to add before exposing it.
+- **Auth is one shared API key.** Setting `API_KEY` closes the API to anonymous
+  callers, but there is no per-caller identity, scoping, or rotation, and the key
+  lives in the process environment rather than a secret manager. Fine for a
+  single-operator deployment; not a multi-tenant one.
 
 ## License
 

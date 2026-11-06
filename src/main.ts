@@ -69,6 +69,7 @@ async function main(): Promise<void> {
       client: new HttpDeliveryClient(),
       policy: { baseMs: config.BASE_BACKOFF_MS, maxMs: config.MAX_BACKOFF_MS },
       rateLimitPerSec: config.RATE_LIMIT_PER_SEC,
+      deliveryTimeoutMs: config.DELIVERY_TIMEOUT_MS,
     });
 
     const stop = await runWorker({

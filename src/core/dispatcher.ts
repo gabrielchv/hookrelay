@@ -35,6 +35,8 @@ export interface DispatcherDeps {
   client: DeliveryClient;
   policy: BackoffPolicy;
   rateLimitPerSec: number;
+  /** Per-request timeout handed to the delivery client. */
+  deliveryTimeoutMs: number;
   now?: () => number;
   random?: () => number;
 }
@@ -91,7 +93,7 @@ export class Dispatcher {
           secret: endpoint.secret,
           payload: delivery.payload,
           attempt,
-          timeoutMs: 5000,
+          timeoutMs: this.deps.deliveryTimeoutMs,
         });
       } catch (error) {
         result = {

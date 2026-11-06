@@ -10,6 +10,7 @@ import type {
   KeyValueStore,
 } from '../ports.js';
 import type { Delivery, Endpoint, EventEnvelope } from '../types.js';
+import { apiKeyEquals, extractApiKey } from './auth.js';
 
 const endpointSchema = z.object({
   url: z
@@ -63,6 +64,27 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
     logger.error({ err: error, url: request.url }, 'request failed');
     return reply.status(500).send({ error: 'internal_error' });
   });
+
+  // Registered before the routes so Fastify applies it to every /v1 handler.
+  // /healthz is intentionally left out: probes cannot carry a credential.
+  if (config.API_KEY) {
+    const expected = config.API_KEY;
+    app.addHook('onRequest', async (request, reply) => {
+      if (!request.url.startsWith('/v1/')) return;
+
+      const presented = extractApiKey(request.headers);
+      if (!presented || !apiKeyEquals(presented, expected)) {
+        logger.warn({ url: request.url, ip: request.ip }, 'rejected unauthenticated request');
+        return reply
+          .status(401)
+          .header('www-authenticate', 'Bearer realm="hookrelay"')
+          .send({ error: 'unauthorized' });
+      }
+    });
+    logger.info('API key required for /v1 routes');
+  } else {
+    logger.warn('API_KEY is not set: /v1 routes are unauthenticated');
+  }
 
   app.get('/healthz', async (_request, reply) => {
     let redis = false;
