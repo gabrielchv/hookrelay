@@ -20,6 +20,10 @@ data:
   MAX_BACKOFF_MS: "30000"
   RATE_LIMIT_PER_SEC: "20"
   SCHEDULER_INTERVAL_MS: "200"
+  # Delivery targets are caller-supplied URLs. Leave this false in production:
+  # setting it lets a registered endpoint reach the metadata service and every
+  # other host the worker can reach.
+  ALLOW_PRIVATE_ENDPOINTS: "false"
 ---
 # Placeholder only. In a real cluster this comes from External Secrets / SSM
 # scoped to the task IAM role (see terraform/), never from a committed manifest.

@@ -17,6 +17,20 @@ const schema = z.object({
     z.string().min(16, 'API_KEY must be at least 16 characters').optional(),
   ),
 
+  /**
+   * Permit deliveries to loopback, private and link-local addresses.
+   *
+   * Off by default: a webhook target is a URL supplied by a caller, and letting
+   * one dial `169.254.169.254` or `redis:6379` turns the delivery worker into
+   * an SSRF proxy for the network it runs in. The compose demo and the local
+   * k3s ConfigMap set it because they deliver to container service names;
+   * anything reachable from outside should leave it off.
+   */
+  ALLOW_PRIVATE_ENDPOINTS: z
+    .string()
+    .optional()
+    .transform((value) => value === 'true' || value === '1'),
+
   /** Which transport the worker consumes and the API publishes to. */
   BROKER: z.enum(['kafka', 'sqs']).default('kafka'),
 

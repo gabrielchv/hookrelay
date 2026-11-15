@@ -50,6 +50,12 @@ export interface DeliveryResult {
   statusCode: number | null;
   error: string | null;
   durationMs: number;
+  /**
+   * A failure that retrying cannot fix (for example a delivery target the SSRF
+   * guard refuses). The dispatcher dead-letters these immediately instead of
+   * spending the remaining attempts on them.
+   */
+  permanent?: boolean;
 }
 
 export interface DeliveryClient {

@@ -100,6 +100,40 @@ flight gets `409`, not a duplicate.
 Crucially, a *failed* request deletes the key, so the caller can legitimately
 retry rather than being locked out by their own failed attempt.
 
+## Delivery targets are untrusted input
+
+An endpoint URL is caller-supplied, and the worker dials it from inside the
+network. That is an SSRF primitive: without a guard, a registered endpoint can
+reach the cloud metadata service, Redis, or any internal admin surface the
+worker can route to.
+
+The guard is split in two because either half alone is insufficient:
+
+- **At registration** (`assertDeliverableUrl`) the URL is checked statically:
+  http(s) only, no embedded credentials, and no IP literal in a private,
+  loopback, link-local, CGNAT, multicast or reserved range. No DNS is
+  performed, so registration stays fast and works offline. This catches the
+  obvious cases and gives the caller a `400` they can act on.
+- **At connect time** (`createGuardedLookup`) the address returned by
+  `dns.lookup` is validated and then handed back to the socket. Because the
+  hook runs inside the connect path, the address that was checked is the
+  address that is dialled; there is no window for a second DNS answer. This is
+  what stops rebinding — a name that looked public at registration and now
+  resolves to `127.0.0.1`.
+
+The delivery client uses `node:http(s).request` rather than `fetch` for exactly
+this hook. It also never follows redirects: a `3xx` is a non-2xx attempt, so a
+receiver cannot bounce the worker to an address the guard never saw.
+
+IPv4-mapped (`::ffff:127.0.0.1`), NAT64 (`64:ff9b::/96`) and 6to4 (`2002::/16`)
+addresses are unwrapped and judged by their embedded IPv4 address — otherwise
+the IPv6 form would be a way around the IPv4 rules.
+
+A blocked target is a `permanent` failure: the dispatcher dead-letters it on
+the first attempt instead of spending the retry budget on an answer that
+cannot change. `ALLOW_PRIVATE_ENDPOINTS=true` reopens the private space for
+the local demo, where deliveries intentionally target Docker/k3s service names.
+
 ## Storage choices
 
 - **DynamoDB** for endpoints and deliveries: single-digit-millisecond point
@@ -122,3 +156,7 @@ retry rather than being locked out by their own failed attempt.
 5. **Signature rotation** — the verifier already accepts multiple `v1=`
    signatures, so the receiver side of rotation exists; the API side (issuing a
    second secret) does not yet.
+6. **An egress allowlist** in place of `ALLOW_PRIVATE_ENDPOINTS`. The flag is
+   all-or-nothing: it reopens the entire private space rather than naming the
+   hosts a deployment is actually allowed to reach. The right answer is a
+   network policy or a configured allowlist checked in the same lookup hook.

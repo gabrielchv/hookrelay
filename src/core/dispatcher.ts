@@ -114,7 +114,10 @@ export class Dispatcher {
         return 'delivered';
       }
 
-      if (attempt >= delivery.maxAttempts) {
+      // `permanent` failures are known-bad targets (say, an endpoint the SSRF
+      // guard refuses): retrying cannot change the answer, so dead-letter now
+      // instead of spending the remaining attempts on it.
+      if (attempt >= delivery.maxAttempts || result.permanent) {
         await this.finish(delivery, 'dead', {
           attempts: attempt,
           lastStatusCode: result.statusCode,
