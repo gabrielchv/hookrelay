@@ -66,7 +66,9 @@ async function main(): Promise<void> {
       locks: kv,
       limiter: new RedisRateLimiter(redis),
       scheduler,
-      client: new HttpDeliveryClient(),
+      client: new HttpDeliveryClient({
+        allowPrivateEndpoints: config.ALLOW_PRIVATE_ENDPOINTS,
+      }),
       policy: { baseMs: config.BASE_BACKOFF_MS, maxMs: config.MAX_BACKOFF_MS },
       rateLimitPerSec: config.RATE_LIMIT_PER_SEC,
       deliveryTimeoutMs: config.DELIVERY_TIMEOUT_MS,

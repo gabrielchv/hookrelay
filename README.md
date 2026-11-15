@@ -30,6 +30,9 @@ producer ──▶ API ──▶ Kafka | SQS ──▶ worker ──▶ your end
   protection and multi-signature support for secret rotation.
 - **Idempotent ingestion** via a caller-supplied `Idempotency-Key`.
 - **Dead-letter replay** through the API.
+- **SSRF guard on every delivery target**: scheme and credential checks at
+  registration, plus DNS-resolution checks inside the connect path so a
+  hostname that rebinds to `127.0.0.1` or `169.254.169.254` never gets dialled.
 
 ## Quick start
 
@@ -173,6 +176,7 @@ misconfiguration fails fast instead of surfacing as a confusing runtime error.
 | `SQS_QUEUE_URL` | — | required when `BROKER=sqs` |
 | `AWS_ENDPOINT_URL` | — | `http://moto:5000` locally; unset for real AWS |
 | `API_KEY` | — | when set, `/v1` requires it (16+ chars); unset = open API |
+| `ALLOW_PRIVATE_ENDPOINTS` | `false` | permit deliveries to loopback/private/link-local targets; the compose demo turns it on |
 | `MAX_ATTEMPTS` | `5` | |
 | `BASE_BACKOFF_MS` / `MAX_BACKOFF_MS` | `250` / `30000` | |
 | `DELIVERY_TIMEOUT_MS` | `5000` | per delivery attempt |
@@ -188,7 +192,7 @@ src/
   broker/      Kafka + SQS adapters
   api/         Fastify routes
   worker/      broker consumer + retry scheduler
-tests/         49 unit tests, all against in-memory fakes
+tests/         107 unit tests, all against in-memory fakes
 scripts/       demo (e2e) and provisioning
 terraform/     real-AWS SQS + DynamoDB + least-privilege IAM
 k8s/           Deployments, HPAs, PDBs, probes, security contexts
@@ -203,11 +207,15 @@ tested in milliseconds without a single container.
 What I ran, and what it showed:
 
 - `pnpm typecheck` — clean.
-- `pnpm test` — **49/49 passing**. Covers backoff bounds, signature
+- `pnpm test` — **107/107 passing**. Covers backoff bounds, signature
   verification (tampering, wrong secret, replay, rotation), dispatcher state
   transitions, lease behaviour, rate-limit not consuming attempts, API fan-out,
   idempotent replay, secret redaction, API-key auth (bearer, header, wrong key,
   open `/healthz`), and the configured delivery timeout reaching the client.
+  The SSRF guard has its own suite: every blocked IPv4/IPv6 range, obfuscated
+  literals (`2130706433`, `0x7f.1`), mapped/NAT64/6to4 embeddings, credential
+  smuggling, rebinding via an injected resolver, no redirect following, and a
+  permanent block dead-lettering on attempt 1 instead of 5.
 - `pnpm demo` against docker compose with `API_KEY` set — **passes on both
   Kafka and SQS**.
   Delivered after retries, reached `dead` at `maxAttempts`, every received
@@ -216,6 +224,13 @@ What I ran, and what it showed:
 - API-key auth exercised against the live stack: `/v1` returns `401` with no
   credential or a wrong one, `201`/`404` with a correct `Authorization: Bearer`
   or `X-Api-Key`, and `/healthz` stays `200` throughout.
+- SSRF guard exercised against the live stack with `ALLOW_PRIVATE_ENDPOINTS=false`:
+  registering `http://169.254.169.254/latest/meta-data/` returns `400` naming
+  the range; a registered `http://sink:3100/hook` — which passes the static
+  check because it is a hostname — is dead-lettered on **attempt 1** with
+  `endpoint host "sink" resolved to 172.20.0.3, which is in a private or
+  reserved range`. The same stack with the flag on completes the full demo, so
+  the guard blocks the internal host without breaking legitimate delivery.
 - `terraform init -backend=false && terraform validate` — valid. `plan`/`apply`
   were **not** run: that needs a real AWS account and would cost money.
 - **Kubernetes: deployed and exercised in a real cluster** (k3d, k8s v1.30.4).
@@ -228,6 +243,15 @@ What I ran, and what it showed:
   correctly; it was not driven to scale under sustained load.
 
 ## Known issues / honest gaps
+
+- **TLS is only as good as the resolved address.** The delivery client dials
+  whatever `dns.lookup` returns after validating it; it does not pin a
+  certificate to a prior resolution. That is the correct trade-off for
+  webhooks (the certificate must match the hostname), but it means a
+  compromised resolver is a threat this code does not remove.
+- **`ALLOW_PRIVATE_ENDPOINTS` is all-or-nothing.** It reopens the entire
+  private space rather than, say, a named allowlist. Fine for a local demo;
+  a multi-tenant deployment should replace it with an explicit egress policy.
 
 - **`plan`/`apply` for Terraform is untested** — no AWS account exercised. IAM
   policies are written least-privilege but not proven against real API calls.

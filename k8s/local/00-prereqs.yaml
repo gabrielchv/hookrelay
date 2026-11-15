@@ -34,6 +34,9 @@ data:
   MAX_BACKOFF_MS: "2000"
   RATE_LIMIT_PER_SEC: "50"
   SCHEDULER_INTERVAL_MS: "100"
+  # Local only: the demo delivers to the in-cluster `hookrelay-sink` Service,
+  # which resolves to a private address. Production leaves this unset (false).
+  ALLOW_PRIVATE_ENDPOINTS: "true"
 ---
 apiVersion: v1
 kind: Secret

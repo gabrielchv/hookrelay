@@ -17,6 +17,10 @@ x-app-env: &app-env
   BROKER: ${BROKER:-kafka}
   # Empty means an open API (local default). Set API_KEY=... to require the key.
   API_KEY: ${API_KEY:-}
+  # The demo delivers to the `sink` service on the private compose network, so
+  # the SSRF guard is opened up here. Never default this to true anywhere a
+  # caller you do not control can register an endpoint.
+  ALLOW_PRIVATE_ENDPOINTS: ${ALLOW_PRIVATE_ENDPOINTS:-true}
   REDIS_URL: redis://redis:6379
   KAFKA_BROKERS: kafka:9092
   KAFKA_TOPIC: hookrelay.deliveries

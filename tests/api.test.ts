@@ -19,12 +19,12 @@ interface Harness {
   broker: RecordingBroker;
 }
 
-function harness(): Harness {
+function harness(env: NodeJS.ProcessEnv = {}): Harness {
   const endpoints = new MemoryEndpointRepo();
   const deliveries = new MemoryDeliveryRepo();
   const broker = new RecordingBroker();
   const app = buildServer({
-    config: loadConfig({}),
+    config: loadConfig(env),
     endpoints,
     deliveries,
     kv: new MemoryKeyValueStore(),
@@ -42,8 +42,8 @@ afterEach(async () => {
   current = null;
 });
 
-async function withApp(): Promise<Harness> {
-  current = harness();
+async function withApp(env: NodeJS.ProcessEnv = {}): Promise<Harness> {
+  current = harness(env);
   return current;
 }
 
@@ -83,6 +83,43 @@ describe('POST /v1/endpoints', () => {
     const response = await registerEndpoint(h, { url: 'ftp://example.test/hook' });
     expect(response.statusCode).toBe(400);
     expect(response.json().error).toBe('validation_error');
+  });
+
+  it('refuses targets inside the private network', async () => {
+    const h = await withApp();
+
+    for (const url of [
+      'http://169.254.169.254/latest/meta-data/iam/security-credentials/',
+      'http://127.0.0.1:6379/',
+      'http://localhost/hook',
+      'http://10.0.0.5/hook',
+      'http://[::1]:8080/hook',
+    ]) {
+      const response = await registerEndpoint(h, { url, eventTypes: ['*'] });
+      expect(response.statusCode, url).toBe(400);
+      expect(response.json().error).toBe('validation_error');
+    }
+
+    expect(h.endpoints.items.size).toBe(0);
+  });
+
+  it('rejects urls that smuggle credentials', async () => {
+    const h = await withApp();
+    const response = await registerEndpoint(h, {
+      url: 'https://good.example@evil.example/hook',
+      eventTypes: ['*'],
+    });
+    expect(response.statusCode).toBe(400);
+    expect(response.json().issues[0].message).toMatch(/credentials/);
+  });
+
+  it('accepts private targets only when explicitly allowed', async () => {
+    const h = await withApp({ ALLOW_PRIVATE_ENDPOINTS: 'true' });
+    const response = await registerEndpoint(h, {
+      url: 'http://localhost:3100/hook',
+      eventTypes: ['*'],
+    });
+    expect(response.statusCode).toBe(201);
   });
 
   it('404s an unknown endpoint', async () => {

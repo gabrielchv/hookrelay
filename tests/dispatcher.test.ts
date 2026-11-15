@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { Dispatcher } from '../src/core/dispatcher.js';
 import { HttpDeliveryClient } from '../src/delivery/client.js';
+import type { DeliveryResult } from '../src/ports.js';
 import type { Delivery, Endpoint } from '../src/types.js';
 import {
   AlwaysAllowLimiter,
@@ -27,7 +28,7 @@ interface Harness {
 }
 
 function harness(
-  results: Array<{ ok: boolean; statusCode: number | null; error: string | null; durationMs: number }>,
+  results: DeliveryResult[],
   options: { limiter?: 'allow' | 'deny'; endpoint?: Endpoint; timeoutMs?: number } = {},
 ): Harness {
   const deliveries = new MemoryDeliveryRepo();
@@ -181,6 +182,28 @@ describe('Dispatcher', () => {
     await h.dispatcher.process(makeJob());
 
     expect(h.client.requests[0]?.timeoutMs).toBe(1234);
+  });
+
+  it('dead-letters a permanent failure on the first attempt', async () => {
+    const h = harness([
+      {
+        ok: false,
+        statusCode: null,
+        error: 'endpoint host 127.0.0.1 is in a private or reserved range',
+        durationMs: 1,
+        permanent: true,
+      },
+    ]);
+    await h.deliveries.create(delivery);
+
+    await expect(h.dispatcher.process(makeJob())).resolves.toBe('dead');
+
+    const stored = await h.deliveries.get(delivery.id);
+    expect(stored?.status).toBe('dead');
+    expect(stored?.attempts).toBe(1);
+    expect(stored?.lastError).toMatch(/private or reserved/);
+    // No retry scheduled, and the remaining attempts were not spent on it.
+    expect(h.scheduler.scheduled.size).toBe(0);
   });
 });
 
