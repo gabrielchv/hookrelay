@@ -10,18 +10,34 @@ import type {
   KeyValueStore,
 } from '../ports.js';
 import type { Delivery, Endpoint, EventEnvelope } from '../types.js';
+import { assertDeliverableUrl } from '../core/url-guard.js';
 import { apiKeyEquals, extractApiKey } from './auth.js';
 
-const endpointSchema = z.object({
-  url: z
-    .string()
-    .url()
-    .refine((value) => ['http:', 'https:'].includes(new URL(value).protocol), {
-      message: 'url must use http or https',
-    }),
-  eventTypes: z.array(z.string().min(1).max(128)).min(1).default(['*']),
-  secret: z.string().min(16).max(256).optional(),
-});
+/**
+ * Registration is the cheap half of the SSRF guard: refuse an obviously
+ * undeliverable URL at write time with a 400 the caller can act on. The
+ * delivery path checks again, because a hostname can resolve differently
+ * later.
+ */
+function endpointSchema(allowPrivate: boolean) {
+  return z.object({
+    url: z
+      .string()
+      .url()
+      .superRefine((value, ctx) => {
+        try {
+          assertDeliverableUrl(value, { allowPrivate });
+        } catch (error) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: error instanceof Error ? error.message : 'url is not deliverable',
+          });
+        }
+      }),
+    eventTypes: z.array(z.string().min(1).max(128)).min(1).default(['*']),
+    secret: z.string().min(16).max(256).optional(),
+  });
+}
 
 const eventSchema = z.object({
   type: z.string().min(1).max(128),
@@ -47,6 +63,7 @@ function publicEndpoint(endpoint: Endpoint) {
 export function buildServer(deps: ApiDeps): FastifyInstance {
   const { config, endpoints, deliveries, kv, broker, logger } = deps;
   const app = Fastify({ logger: false, bodyLimit: 256 * 1024 });
+  const inputSchema = endpointSchema(config.ALLOW_PRIVATE_ENDPOINTS);
 
   app.setErrorHandler((error: FastifyError, request, reply) => {
     if (error instanceof ZodError) {
@@ -100,7 +117,7 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
   });
 
   app.post('/v1/endpoints', async (request, reply) => {
-    const input = endpointSchema.parse(request.body);
+    const input = inputSchema.parse(request.body);
     const endpoint: Endpoint = {
       id: randomUUID(),
       url: input.url,
