@@ -154,11 +154,20 @@ describe('retry scheduler tick', () => {
     await scheduleDue(scheduler, ids);
     broker.failing.add('d2');
 
+    const before = Date.now();
     await runOneTick({ scheduler, broker, deliveries });
 
     // d1 and d3 were published; d2 must be pending again, not vanished.
     expect(scheduler.scheduled.has('d2')).toBe(true);
-    expect(scheduler.scheduled.get('d2')).toBeGreaterThan(Date.now());
+
+    // The reschedule is one interval after the failure. Assert that relationship
+    // rather than comparing to `Date.now()` at assertion time: the tick itself
+    // takes time, so `scheduled > now` fails on any machine slower than the
+    // interval — which is what happened in CI at 25ms.
+    const scheduledAt = scheduler.scheduled.get('d2')!;
+    expect(scheduledAt).toBeGreaterThanOrEqual(before + TICK_MS);
+    expect(scheduledAt).toBeLessThanOrEqual(Date.now() + TICK_MS);
+
     expect(scheduler.scheduled.has('d1')).toBe(false);
     expect(scheduler.scheduled.has('d3')).toBe(false);
   });
