@@ -33,19 +33,61 @@ export async function runWorker(deps: WorkerDeps): Promise<() => Promise<void>> 
     void (async () => {
       try {
         const due = await deps.scheduler.popDue(50);
+        if (due.length === 0) return;
+
+        // `popDue` already removed these ids from the schedule, so every id in
+        // `due` is "in flight" the moment it is returned. Handling them in one
+        // try block meant a single failure — a Dynamo timeout on one `get`, or a
+        // broker publish error — abandoned the rest of the batch with their
+        // schedule entries gone and their rows still `queued`. Nothing reads
+        // `nextAttemptAt` afterwards, so those deliveries were lost until a
+        // human replayed them.
+        //
+        // Each id is now independent, and a failure is put back on the schedule
+        // rather than dropped, so the tick is at-least-once like the rest of the
+        // pipeline.
+        let republished = 0;
+        let deferred = 0;
+
         for (const deliveryId of due) {
-          const delivery = await deps.deliveries.get(deliveryId);
-          if (!delivery) continue;
-          if (delivery.status === 'delivered' || delivery.status === 'dead') continue;
-          await deps.broker.publish({
-            deliveryId,
-            eventId: delivery.eventId,
-            endpointId: delivery.endpointId,
-            enqueuedAt: Date.now(),
-          });
+          try {
+            const delivery = await deps.deliveries.get(deliveryId);
+            if (!delivery) continue;
+            if (delivery.status === 'delivered' || delivery.status === 'dead') continue;
+            await deps.broker.publish({
+              deliveryId,
+              eventId: delivery.eventId,
+              endpointId: delivery.endpointId,
+              enqueuedAt: Date.now(),
+            });
+            republished += 1;
+          } catch (error) {
+            deferred += 1;
+            deps.logger.error(
+              { err: error, deliveryId },
+              'retry republish failed; rescheduling',
+            );
+            // If this also throws there is nothing left to do but surface it:
+            // the tick must keep going for the other ids either way.
+            try {
+              await deps.scheduler.schedule(
+                deliveryId,
+                Date.now() + deps.config.SCHEDULER_INTERVAL_MS,
+              );
+            } catch (scheduleError) {
+              deps.logger.error(
+                { err: scheduleError, deliveryId },
+                'could not reschedule a failed republish',
+              );
+            }
+          }
         }
-        if (due.length > 0) {
-          deps.logger.info({ count: due.length }, 'retries republished');
+
+        if (republished > 0 || deferred > 0) {
+          deps.logger.info(
+            { republished, deferred },
+            'retries republished',
+          );
         }
       } catch (error) {
         deps.logger.error({ err: error }, 'retry scheduler tick failed');

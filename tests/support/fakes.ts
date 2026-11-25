@@ -89,11 +89,12 @@ export class MemoryScheduler implements RetryScheduler {
     this.scheduled.set(deliveryId, atEpochMs);
   }
 
-  async popDue(): Promise<string[]> {
+  async popDue(limit?: number): Promise<string[]> {
     const now = Date.now();
     const due = [...this.scheduled.entries()]
       .filter(([, at]) => at <= now)
-      .map(([id]) => id);
+      .map(([id]) => id)
+      .slice(0, limit ?? undefined);
     for (const id of due) this.scheduled.delete(id);
     return due;
   }
