@@ -201,16 +201,49 @@ export function buildServer(deps: ApiDeps): FastifyInstance {
           updatedAt: new Date().toISOString(),
         };
         await deliveries.create(delivery);
-        created.push(delivery);
-      }
 
-      for (const delivery of created) {
-        await broker.publish({
-          deliveryId: delivery.id,
-          eventId: delivery.eventId,
-          endpointId: delivery.endpointId,
-          enqueuedAt: Date.now(),
-        });
+        // Publish immediately after creating the row, and handle the failure
+        // here rather than in a second loop.
+        //
+        // The previous shape created every row first and published afterwards,
+        // so a publish that threw part-way through left two kinds of damage: the
+        // rows already published still went out, and the rows not yet published
+        // stayed `queued` with no broker message and no schedule entry — stranded
+        // forever. Worse, the request then failed and the `catch` deleted the
+        // idempotency key, so the caller's retry re-ran the whole fan-out and
+        // created a *second* set of deliveries. Every endpoint got the event
+        // twice, under two different delivery ids.
+        //
+        // A delivery that cannot be enqueued is now recorded as `dead` with the
+        // reason, visible in the API and replayable with
+        // `POST /v1/deliveries/:id/replay`. The rest of the fan-out proceeds, and
+        // the idempotency result is still stored, so a retry is a no-op instead
+        // of a duplicate.
+        try {
+          await broker.publish({
+            deliveryId: delivery.id,
+            eventId: delivery.eventId,
+            endpointId: delivery.endpointId,
+            enqueuedAt: Date.now(),
+          });
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : String(error);
+          const dead: Delivery = {
+            ...delivery,
+            status: 'dead',
+            lastError: `could not enqueue: ${reason}`,
+            updatedAt: new Date().toISOString(),
+          };
+          await deliveries.update(dead);
+          logger.error(
+            { deliveryId: delivery.id, endpointId: endpoint.id, err: error },
+            'could not enqueue delivery; recorded as dead',
+          );
+          created.push(dead);
+          continue;
+        }
+
+        created.push(delivery);
       }
 
       const response = {
