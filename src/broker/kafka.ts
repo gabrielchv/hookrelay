@@ -6,8 +6,9 @@
  *    on the same partition and stay ordered
  *  - the topic is created explicitly with N partitions rather than relying on
  *    broker auto-creation
- *  - handlers catch their own failures (retries are scheduled in Redis, not by
- *    Kafka), so a poison message cannot stall the consumer group
+ *  - a handler failure is *not* swallowed: the offset is left uncommitted so the
+ *    message is redelivered, which is what the SQS adapter already does by not
+ *    deleting it
  */
 import { Kafka, logLevel, type Consumer, type Producer } from 'kafkajs';
 import type { Config } from '../config.js';
@@ -96,29 +97,54 @@ export class KafkaBroker implements Broker {
 
     await consumer.run({
       eachMessage: async ({ message, partition }) => {
-        if (!message.value) return;
-        let job: DeliveryJob;
         try {
-          job = JSON.parse(message.value.toString()) as DeliveryJob;
+          await this.handleMessage(message.value, handler);
         } catch (error) {
+          // Deliberately rethrown. kafkajs commits the offset after `eachMessage`
+          // resolves, so swallowing the error here *acknowledges* a delivery that
+          // was never sent — and the comment that used to sit here claimed a
+          // Redis retry was already scheduled, which is only true if the handler
+          // got far enough to schedule one. A Dynamo or Redis error inside
+          // `Dispatcher.process` happens before that point.
+          //
+          // Throwing leaves the offset uncommitted, so the message is redelivered
+          // — the same at-least-once behaviour the SQS adapter has by not
+          // deleting it. The cost is that a permanently failing message blocks
+          // its partition until an operator intervenes; SQS gets a redrive policy
+          // for free, Kafka does not, so this is the honest trade rather than a
+          // silent drop.
           this.logger.error(
             { err: error, partition, offset: message.offset },
-            'malformed kafka message dropped',
+            'job handler failed; leaving offset for redelivery',
           );
-          return;
-        }
-        try {
-          await handler(job);
-        } catch (error) {
-          this.logger.error(
-            { err: error, deliveryId: job.deliveryId },
-            'job handler threw; retry is already scheduled in redis',
-          );
+          throw error;
         }
       },
     });
 
     this.consumer = consumer;
+  }
+
+  /**
+   * Parse and dispatch one message. Exposed for tests: a real Kafka is not
+   * needed to check that a handler failure is propagated rather than swallowed.
+   *
+   * A malformed payload is dropped — it can never succeed on redelivery, so
+   * retrying it would block the partition forever. A handler failure is
+   * rethrown, because the message is valid and its delivery is still owed.
+   */
+  async handleMessage(value: Buffer | null, handler: JobHandler): Promise<void> {
+    if (!value) return;
+
+    let job: DeliveryJob;
+    try {
+      job = JSON.parse(value.toString()) as DeliveryJob;
+    } catch (error) {
+      this.logger.error({ err: error }, 'malformed kafka message dropped');
+      return;
+    }
+
+    await handler(job);
   }
 
   async close(): Promise<void> {
